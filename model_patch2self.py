@@ -1,0 +1,198 @@
+from sklearn import linear_model
+from sklearn.neural_network import MLPRegressor
+import numpy as np
+
+
+def _vol_split(train, f):
+
+    """ Split the 3D volumes into the train and test set.
+
+    Parameters
+    ----------
+    train : ndarray
+        Array of all 3D patches flattened out to be 2D.
+
+    f: int
+        The volume number that needs to be held out for training.
+
+    Returns
+    --------
+    cur_X : ndarray
+        Array of patches corresponding to all the volumes except from the held
+        -out volume.
+
+    Y : ndarray
+        Array of patches corresponding to the volume that is used a traget for
+        denoising.
+    """
+
+    # Delete the f-th volume
+    X1 = train[:f, :, :]
+    X2 = train[f+1:, :, :]
+
+    cur_X = np.reshape(np.concatenate((X1, X2), axis=0),
+                       ((train.shape[0]-1)*train.shape[1], train.shape[2]))
+
+    Y = train[f, train.shape[1]//2, :]
+    return cur_X, Y
+
+
+def _vol_denoise(train, f, model, data):
+
+    """ Denoise a single 3D volume using a train and test phase.
+
+    Parameters
+    ----------
+    train : ndarray
+        Array of all 3D patches flattened out to be 2D.
+
+    f: int
+        The volume number that needs to be held out for training.
+
+    model: string
+        Corresponds to the Sklearn object of the regressor being used for
+        performing the denoising. Options: 'ols', 'ridge', 'lasso' and 'mlp'
+        default: 'ols'.
+
+    data: ndarray
+        The 4D noisy DWI data to be denoised.
+
+    Returns
+    --------
+    model prediction : ndarray
+        Denoised array of all 3D patches flattened out to be 2D corresponding
+        to the held out volume `f`.
+
+    """
+
+    # to add a new model, use the following API
+    # We adhere to the following options as they are used for comparisons
+    if model == 'ols':
+        model = linear_model.LinearRegression(copy_X=False,
+                                              fit_intercept=True,
+                                              n_jobs=-1)
+    elif model == 'mlp':
+        model = MLPRegressor(activation='relu',
+                             hidden_layer_sizes=(64,64,64,64),
+                             learning_rate_init=1e-4,
+                             early_stopping=True,
+                             random_state=1, max_iter=500)
+
+    elif model == 'ridge':
+        model = linear_model.Ridge()
+
+    elif model == 'lasso':
+        model = linear_model.Lasso(max_iter=50)
+    else:
+        print('Model not supported. Choose from: ols, ridge, lasso or mlp')
+
+    cur_X, Y = _vol_split(train, f)
+    model.fit(cur_X.T, Y.T)
+
+    print(' -> Trained to Denoise Volume: ', f)
+
+    return model.predict(cur_X.T).reshape(data.shape[0], data.shape[1],
+                                          data.shape[2])
+
+
+def _extract_3d_patches(arr, patch_radius=[0, 0, 0]):
+
+    """ Extract 3D patches from 4D DWI data.
+
+    Parameters
+    ----------
+    arr : ndarray
+        The 4D noisy DWI data to be denoised.
+
+    patch_radius : int or 1D array (optional)
+        The radius of the local patch to be taken around each voxel (in
+        voxels). Default: 0 (denoise in blocks of 1x1x1 voxels).
+
+    Returns
+    --------
+    all_patches : ndarray
+        All 3D patches flattened out to be 2D corresponding to the each 3D
+        volume of the 4D DWI data.
+
+    """
+
+    if isinstance(patch_radius, int):
+        patch_radius = np.ones(3, dtype=int) * patch_radius
+    if len(patch_radius) != 3:
+        raise ValueError("patch_radius should have length 3")
+    else:
+        patch_radius = np.asarray(patch_radius).astype(int)
+    patch_size = 2 * patch_radius + 1
+
+    dim = arr.shape[-1]
+
+    all_patches = []
+
+    # loop around and find the 3D patch for each direction at each pixel
+    for i in range(patch_radius[0], arr.shape[0] -
+                   patch_radius[0], 1):
+        for j in range(patch_radius[1], arr.shape[1] -
+                       patch_radius[1], 1):
+            for k in range(patch_radius[2], arr.shape[2] -
+                           patch_radius[2], 1):
+                # Shorthand for indexing variables:
+                ix1 = i - patch_radius[0]
+                ix2 = i + patch_radius[0] + 1
+                jx1 = j - patch_radius[1]
+                jx2 = j + patch_radius[1] + 1
+                kx1 = k - patch_radius[2]
+                kx2 = k + patch_radius[2] + 1
+
+                X = arr[ix1:ix2, jx1:jx2,
+                        kx1:kx2].reshape(np.prod(patch_size), dim)
+
+                all_patches.append(X)
+
+    return np.array(all_patches).T
+
+
+def patch2self(data, patch_radius=[0, 0, 0], model='ols'):
+
+    """ Patch2Self Denoiser.
+
+    Parameters
+    ----------
+    data : ndarray
+        The 4D noisy DWI data to be denoised.
+
+    patch_radius : int or 1D array (optional)
+        The radius of the local patch to be taken around each voxel (in
+        voxels). Default: 0 (denoise in blocks of 1x1x1 voxels).
+
+    model: string
+        Corresponds to the Sklearn object of the regressor being used for
+        performing the denoising. Options: 'ols', 'ridge', 'lasso' and 'mlp'
+        default: 'ols'.
+
+    Returns
+    --------
+    denoised array : ndarray
+        The 4D denoised DWI data.
+
+    """
+
+    train = _extract_3d_patches(np.pad(data, ((patch_radius[0],
+                                               patch_radius[0]),
+                                              (patch_radius[1],
+                                               patch_radius[1]),
+                                              (patch_radius[2],
+                                               patch_radius[2]),
+                                              (0, 0)), mode='constant'),
+                                patch_radius=patch_radius)
+    print(train.shape)
+    print('Patch Extraction Done...')
+
+    patch_radius = np.asarray(patch_radius).astype(int)
+    print('Training with patch-radius: ', patch_radius)
+    denoised_array = np.zeros((data.shape))
+
+    for f in range(0, data.shape[3]):
+        denoised_array[..., f] = _vol_denoise(train, f, model, data)
+        print('Denoising Volume ', f, ' Complete...')
+
+    return denoised_array
