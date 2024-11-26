@@ -45,5 +45,7 @@ class self2self(nn.Module):
         out2 += out1
         out3 = self.conv_last(out2)
         out = self.conv_last2(out3)
+
+        out = self.relu(out)
                 
         return out
